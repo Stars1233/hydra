@@ -20,6 +20,11 @@ on:
           - hydra-full-release
           - configen
           - all
+      only:
+        description: "Optional comma-separated package config names from the selected set"
+        required: false
+        type: string
+        default: ""
       expected_version:
         description: "Optional version to validate before publishing"
         required: false
@@ -49,12 +54,14 @@ jobs:
       expected_version: ${{ steps.plan.outputs.expected_version }}
       package_set: ${{ steps.plan.outputs.package_set }}
       publish_enabled: ${{ steps.plan.outputs.publish_enabled }}
+      only: ${{ steps.plan.outputs.only }}
     steps:
     - name: Derive publish plan
       id: plan
       env:
         REF_NAME: ${{ github.ref_name }}
         INPUT_PACKAGE_SET: ${{ inputs.package_set }}
+        INPUT_ONLY: ${{ inputs.only }}
         INPUT_EXPECTED_VERSION: ${{ inputs.expected_version }}
         INPUT_PUBLISH: ${{ inputs.publish }}
       run: |
@@ -65,6 +72,7 @@ jobs:
 
         ref_name = os.environ["REF_NAME"]
         input_package_set = os.environ["INPUT_PACKAGE_SET"].strip()
+        input_only = os.environ["INPUT_ONLY"].strip()
         input_expected_version = os.environ["INPUT_EXPECTED_VERSION"].strip()
         input_publish = os.environ["INPUT_PUBLISH"].strip()
 
@@ -87,16 +95,27 @@ jobs:
                 f"1.4.0, or 1.4.1; got {expected_version!r}"
             )
 
+        if input_only and not re.fullmatch(
+            r"[A-Za-z0-9_]+(?:,[A-Za-z0-9_]+)*", input_only
+        ):
+            fail(
+                "only must be a comma-separated list of package config names, "
+                f"got {input_only!r}"
+            )
+
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
             print(f"checkout_ref={checkout_ref}", file=output)
             print(f"expected_version={expected_version}", file=output)
             print(f"package_set={package_set}", file=output)
             print(f"publish_enabled={publish_enabled}", file=output)
+            print(f"only={input_only}", file=output)
 
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
             print("## Publish plan", file=summary)
             print("", file=summary)
             print(f"- Package set: `{package_set}`", file=summary)
+            if input_only:
+                print(f"- Package filter: `{input_only}`", file=summary)
             print(f"- Checkout ref: `{checkout_ref}`", file=summary)
             version = expected_version or "<not provided>"
             print(f"- Expected version: `{version}`", file=summary)
@@ -140,6 +159,7 @@ jobs:
         python tools/release/release.py \
           action=validate_versions \
           set=${{ needs.release-plan.outputs.package_set }} \
+          only="'${{ needs.release-plan.outputs.only }}'" \
           version=${{ needs.release-plan.outputs.expected_version }}
 
     - name: Build distributions
@@ -149,6 +169,7 @@ jobs:
         python tools/release/release.py \
           action=build \
           set=${{ needs.release-plan.outputs.package_set }} \
+          only="'${{ needs.release-plan.outputs.only }}'" \
           repository=pypi \
           clean_build_dir=true \
           require_artifacts=true \
@@ -169,6 +190,7 @@ jobs:
       env:
         PUBLISH_ENABLED: ${{ needs.release-plan.outputs.publish_enabled }}
         PACKAGE_SET: ${{ needs.release-plan.outputs.package_set }}
+        ONLY: ${{ needs.release-plan.outputs.only }}
         EXPECTED_VERSION: ${{ needs.release-plan.outputs.expected_version }}
         TARGET_REPOSITORY: PyPI
       run: |
@@ -186,6 +208,9 @@ jobs:
           echo "- Target repository: ${TARGET_REPOSITORY}"
           echo "- Mode: ${mode}"
           echo "- Package set: \`${PACKAGE_SET}\`"
+          if [[ -n "${ONLY}" ]]; then
+            echo "- Package filter: \`${ONLY}\`"
+          fi
           if [[ -n "${EXPECTED_VERSION}" ]]; then
             echo "- Expected version: \`${EXPECTED_VERSION}\`"
           fi

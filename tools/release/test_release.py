@@ -5,8 +5,10 @@ from tools.release import release
 from tools.release.release import (
     DevReleasePackageInfo,
     LocalPackageInfo,
+    Package,
     PackageInfo,
     fail_if_any_target_version_published,
+    filter_packages,
     format_dev_release_package_table,
     is_publishable,
     parse_version,
@@ -106,6 +108,34 @@ def test_fail_if_any_target_version_published_rejects_published_package() -> Non
         fail_if_any_target_version_published(infos)
 
 
+def test_filter_packages_keeps_requested_packages_in_order() -> None:
+    packages = {
+        "hydra": Package(path="."),
+        "hydra_optuna_sweeper": Package(path="plugins/hydra_optuna_sweeper"),
+        "hydra_ray_launcher": Package(path="plugins/hydra_ray_launcher"),
+    }
+
+    selected = filter_packages(packages, " hydra_ray_launcher, hydra_optuna_sweeper ")
+
+    assert list(selected) == ["hydra_ray_launcher", "hydra_optuna_sweeper"]
+
+
+def test_filter_packages_rejects_unknown_packages() -> None:
+    packages = {
+        "hydra": Package(path="."),
+        "hydra_optuna_sweeper": Package(path="plugins/hydra_optuna_sweeper"),
+    }
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Unknown package filter: hydra_rq_launcher. "
+            "Available packages in selected set: hydra, hydra_optuna_sweeper"
+        ),
+    ):
+        filter_packages(packages, "hydra_rq_launcher")
+
+
 def test_dispatch_publish_workflow_uses_json_boolean_input(monkeypatch) -> None:
     calls = []
 
@@ -126,6 +156,7 @@ def test_dispatch_publish_workflow_uses_json_boolean_input(monkeypatch) -> None:
         "hydra-full-release",
         parse_version("1.4.0.dev3"),
         "main",
+        "hydra_optuna_sweeper",
     )
 
     assert calls == [
@@ -143,7 +174,8 @@ def test_dispatch_publish_workflow_uses_json_boolean_input(monkeypatch) -> None:
             ],
             "/repo",
             '{"package_set": "hydra-full-release", '
-            '"expected_version": "1.4.0.dev3", "publish": "true"}',
+            '"expected_version": "1.4.0.dev3", "publish": "true", '
+            '"only": "hydra_optuna_sweeper"}',
         )
     ]
 

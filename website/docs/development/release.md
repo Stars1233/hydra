@@ -47,6 +47,23 @@ The release tool is package-set aware:
 The default Hydra release set is `hydra-full-release`. `hydra-configen` remains
 a supported target, but it is not included in the default Hydra package release.
 
+Use `only=<package_config_name>[,<package_config_name>...]` to narrow a package
+set without adding a new named package set. Package config names are the keys in
+`tools/release/conf/packages/`. For example, to target only the Optuna plugin
+from the bundled plugin set:
+
+```shell
+python tools/release/release.py \
+  action=check \
+  set=hydra-plugins \
+  only=hydra_optuna_sweeper \
+  repository=pypi
+```
+
+Quote comma-separated filters so the quotes reach Hydra when passing more than
+one package through a shell, for example
+`only=\"hydra_optuna_sweeper,hydra_ray_launcher\"`.
+
 ## Versioning
 
 The Hydra core version is defined in `hydra/__init__.py`. Plugin versions are
@@ -153,6 +170,16 @@ exact publish workflow dispatch that would run:
 python tools/release/release.py \
   action=dev_release \
   set=hydra-full-release \
+  version=1.4.0.dev3
+```
+
+To dry-run a single plugin dev release, narrow the selected package set:
+
+```shell
+python tools/release/release.py \
+  action=dev_release \
+  set=hydra-plugins \
+  only=hydra_optuna_sweeper \
   version=1.4.0.dev3
 ```
 

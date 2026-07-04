@@ -22,6 +22,11 @@ on:
           - hydra-full-release
           - configen
           - all
+      only:
+        description: "Optional comma-separated package config names from the selected set"
+        required: false
+        type: string
+        default: ""
       target_branch_override:
         description: "Recovery/testing only. Leave empty for normal releases."
         required: false
@@ -55,6 +60,7 @@ jobs:
           RELEASE_LINE: ${{ inputs.release_line }}
           TARGET_VERSION: ${{ inputs.target_version }}
           INPUT_PACKAGE_SET: ${{ inputs.package_set }}
+          INPUT_ONLY: ${{ inputs.only }}
           TARGET_BRANCH_OVERRIDE: ${{ inputs.target_branch_override }}
           RELEASE_DATE: ${{ inputs.release_date }}
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -103,6 +109,15 @@ jobs:
               fail(
                   f"target_version {target_version!r} belongs to line "
                   f"{version_line}, not {release_line}"
+              )
+
+          input_only = os.environ["INPUT_ONLY"].strip()
+          if input_only and not re.fullmatch(
+              r"[A-Za-z0-9_]+(?:,[A-Za-z0-9_]+)*", input_only
+          ):
+              fail(
+                  "only must be a comma-separated list of package config names, "
+                  f"got {input_only!r}"
               )
 
           micro = int(match.group("micro"))
@@ -166,6 +181,11 @@ jobs:
               print(f"- Target version: `{target_version}`", file=summary)
               print(f"- Release kind: `{release_kind}`", file=summary)
               print(f"- Package set: `{os.environ['INPUT_PACKAGE_SET']}`", file=summary)
+              if input_only:
+                  print(
+                      f"- Package filter: `{input_only}`",
+                      file=summary,
+                  )
               print(f"- Target branch: `{target_branch}`", file=summary)
               print(f"- Release date: `{release_date}`", file=summary)
           PY
@@ -205,6 +225,7 @@ jobs:
           python tools/release/release.py \
             action=set_version \
             set=${{ inputs.package_set }} \
+            only="'${{ inputs.only }}'" \
             version=${{ inputs.target_version }}
 
       - name: Compare selected packages against PyPI
@@ -214,6 +235,7 @@ jobs:
           python tools/release/release.py \
             action=check \
             set=${{ inputs.package_set }} \
+            only="'${{ inputs.only }}'" \
             repository=pypi
 
   artifact-build-check:
@@ -253,6 +275,7 @@ jobs:
           python tools/release/release.py \
             action=set_version \
             set=${{ inputs.package_set }} \
+            only="'${{ inputs.only }}'" \
             version=${{ inputs.target_version }}
 
       - name: Build publishable artifacts
@@ -262,6 +285,7 @@ jobs:
           python tools/release/release.py \
             action=build \
             set=${{ inputs.package_set }} \
+            only="'${{ inputs.only }}'" \
             repository=pypi \
             clean_build_dir=true \
             require_artifacts=true \
@@ -366,6 +390,9 @@ jobs:
             export PATH="$HOME/miniconda3/envs/hydra/bin:$PATH"
           fi
           export NOX_PYTHON_VERSIONS=${{ matrix.py_version }}
+          if [[ -n "${{ inputs.only }}" ]]; then
+            export PLUGINS="${{ inputs.only }}"
+          fi
           pip install nox --progress-bar off
           nox -s test_tools test_core \
             test_jupyter_notebooks test_plugins test_plugins_vs_core -ts
@@ -377,6 +404,9 @@ jobs:
           $env:CONDA_DLL_SEARCH_MODIFICATION_ENABLE = "1"
           conda run -n hydra pip install nox --progress-bar off
           $env:NOX_PYTHON_VERSIONS = "${{ matrix.py_version }}"
+          if ("${{ inputs.only }}" -ne "") {
+            $env:PLUGINS = "${{ inputs.only }}"
+          }
           $env:ConEmuDefaultCp = "65001"
           $env:PYTHONIOENCODING = "utf_8"
           conda run -n hydra nox -s test_tools test_core test_jupyter_notebooks test_plugins test_plugins_vs_core -ts

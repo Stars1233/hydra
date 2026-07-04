@@ -13,14 +13,13 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import requests  # type: ignore[import-untyped]
-from omegaconf import II, MISSING, SI, DictConfig, OmegaConf
-from packaging.version import Version, parse
-
 import hydra
+import requests  # type: ignore[import-untyped]
 from hydra.core.config_store import ConfigStore
 from hydra.core.hydra_config import HydraConfig
 from hydra.test_utils.test_utils import find_parent_dir_containing, run_python_script
+from omegaconf import II, MISSING, SI, DictConfig, OmegaConf
+from packaging.version import Version, parse
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +71,7 @@ class Config:
     version: Optional[str] = None
     publish: bool = False
     workflow_ref: str = "main"
+    only: str = ""
 
 
 ConfigStore.instance().store(name="config_schema", node=Config)
@@ -207,6 +207,23 @@ def format_latest_version(version: Optional[Version]) -> str:
 def validate_dev_version(version: Version) -> None:
     if not version.is_devrelease:
         raise ValueError(f"Dev releases require a .devN version; got {version}")
+
+
+def filter_packages(packages: Dict[str, Package], only: str) -> Dict[str, Package]:
+    names = [name.strip() for name in only.split(",") if name.strip()]
+    if not names:
+        return packages
+
+    unknown = sorted(set(names) - set(packages.keys()))
+    if unknown:
+        available = ", ".join(sorted(packages.keys()))
+        requested = ", ".join(unknown)
+        raise ValueError(
+            f"Unknown package filter: {requested}. "
+            f"Available packages in selected set: {available}"
+        )
+
+    return {name: packages[name] for name in names}
 
 
 def collect_dev_release_package_info(
@@ -562,12 +579,14 @@ def dispatch_publish_workflow(
     package_set: str,
     target_version: Version,
     workflow_ref: str,
+    only: str = "",
 ) -> None:
     repo_slug = get_github_repo_slug(get_remote_url(hydra_root, vcs))
     inputs = {
         "package_set": package_set,
         "expected_version": str(target_version),
         "publish": "true",
+        "only": only,
     }
     _run_checked(
         [
@@ -631,10 +650,11 @@ def run_dev_release(
         ensure_publish_base_matches_ref(hydra_root, vcs, workflow_ref)
     log.info(
         "Would dispatch Publish to PyPI: ref=%s package_set=%s "
-        "expected_version=%s publish=true",
+        "expected_version=%s only=%s publish=true",
         workflow_ref,
         package_set,
         target_version,
+        cfg.only or "<none>",
     )
 
     if not cfg.publish:
@@ -652,7 +672,7 @@ def run_dev_release(
     else:
         log.info("Selected packages are already at %s; skipping commit", target_version)
     dispatch_publish_workflow(
-        hydra_root, vcs, package_set, target_version, workflow_ref
+        hydra_root, vcs, package_set, target_version, workflow_ref, cfg.only
     )
 
 
@@ -663,6 +683,7 @@ OmegaConf.register_resolver("parent_key", lambda _parent_: _parent_._key())
 def main(cfg: Config) -> None:
     hydra_root = find_parent_dir_containing(target="ATTRIBUTION")
     package_set = selected_package_set_name()
+    cfg.packages = filter_packages(cfg.packages, cfg.only)
     build_dir_path = Path(cfg.build_dir).expanduser()
     if not build_dir_path.is_absolute():
         build_dir_path = Path(os.getcwd()) / build_dir_path

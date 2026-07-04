@@ -16,6 +16,22 @@ upload them from GitHub Actions.
 - `set=configen`: `hydra-configen` only.
 - `set=all`: `hydra-core`, `hydra-configen`, and all bundled Hydra plugins.
 
+Use `only=<package_config_name>[,<package_config_name>...]` to narrow a package
+set without creating a new named set. Package config names are the keys under
+`tools/release/conf/packages/`, for example:
+
+```shell
+python tools/release/release.py \
+  action=check \
+  set=hydra-plugins \
+  only=hydra_optuna_sweeper \
+  repository=pypi
+```
+
+Quote comma-separated filters so the quotes reach Hydra when passing more than
+one package through a shell, for example
+`only=\"hydra_optuna_sweeper,hydra_ray_launcher\"`.
+
 ### Check published versions
 
 ```shell
@@ -102,6 +118,16 @@ Run a dry run for a coordinated dev release:
 python tools/release/release.py \
   action=dev_release \
   set=hydra-full-release \
+  version=1.4.0.dev3
+```
+
+Run a dry run for a single plugin dev release:
+
+```shell
+python tools/release/release.py \
+  action=dev_release \
+  set=hydra-plugins \
+  only=hydra_optuna_sweeper \
   version=1.4.0.dev3
 ```
 
