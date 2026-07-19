@@ -187,6 +187,7 @@ def test_check_build_artifacts_upgrades_smoke_environment_pip(
 ) -> None:
     wheel = tmp_path / "package.whl"
     wheel.touch()
+    smoke_dir = tmp_path / "smoke"
     calls = []
 
     def fake_run_checked(cmd, cwd=None, stdin=None):
@@ -197,17 +198,18 @@ def test_check_build_artifacts_upgrades_smoke_environment_pip(
     monkeypatch.setattr(
         release.tempfile,
         "TemporaryDirectory",
-        lambda prefix: nullcontext("/smoke"),
+        lambda prefix: nullcontext(str(smoke_dir)),
     )
 
     release.check_build_artifacts(tmp_path)
 
-    smoke_python = "/smoke/venv/bin/python"
+    venv_path = smoke_dir / "venv"
+    smoke_python = release._python_bin(venv_path)
     assert calls == [
         [release.sys.executable, "-m", "twine", "check", str(wheel)],
-        [release.sys.executable, "-m", "venv", "/smoke/venv"],
-        [smoke_python, "-m", "pip", "install", "--upgrade", "pip"],
-        [smoke_python, "-m", "pip", "install", "--no-deps", str(wheel)],
+        [release.sys.executable, "-m", "venv", str(venv_path)],
+        [str(smoke_python), "-m", "pip", "install", "--upgrade", "pip"],
+        [str(smoke_python), "-m", "pip", "install", "--no-deps", str(wheel)],
     ]
 
 
