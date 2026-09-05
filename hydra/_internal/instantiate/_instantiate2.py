@@ -3,11 +3,34 @@
 import copy
 import inspect
 import re
+import weakref
+from contextlib import ExitStack, contextmanager, nullcontext
 from enum import Enum
 from textwrap import dedent
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union, cast
+from typing import (
+    Any,
+    Callable,
+    ContextManager,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+    cast,
+)
 
-from omegaconf import AnyNode, DictConfig, Node, OmegaConf, SCMode
+from omegaconf import (
+    AnyNode,
+    Container,
+    DictConfig,
+    Node,
+    OmegaConf,
+    SCMode,
+    UnionNode,
+    flag_override,
+)
 from omegaconf._utils import is_structured_config
 from omegaconf.errors import InterpolationResolutionError
 
@@ -32,6 +55,9 @@ from hydra.errors import InstantiationException
 from hydra.types import ConvertMode
 
 ConfigOverlay = Union[Dict[str, Any], DictConfig]
+DeferredCallContext = Optional[
+    Callable[[_DeferredTarget, Tuple[Any, ...], Dict[str, Any]], ContextManager[None]]
+]
 _INSTANTIATE_OVERRIDE_RESOLVER = "hydra.instantiate_override"
 _INSTANTIATE_OVERRIDE_STORAGE = "_hydra_instantiate_overrides"
 
@@ -58,6 +84,87 @@ def _is_target(x: Any) -> bool:
     if OmegaConf.is_dict(x):
         return "_target_" in x
     return False
+
+
+@contextmanager
+def _read_only_config_tree(*configs: Node) -> Iterator[None]:
+    context_roots = {id(config._get_root()) for config in configs}
+    nodes = []
+    pending: List[Node] = []
+    for config in configs:
+        ancestor: Optional[Node] = config
+        while ancestor is not None:
+            # Merged nodes can retain a parent only as interpolation context and
+            # may therefore not be owned by the next ancestor.
+            pending.append(ancestor)
+            ancestor = ancestor._get_parent()
+    seen = set()
+    while pending:
+        node = pending.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+
+        if isinstance(node, Container):
+            nodes.append(node)
+            keys: Sequence[Any]
+            if isinstance(node, DictConfig):
+                keys = list(node.keys())
+            else:
+                keys = range(len(cast(Sequence[Any], node)))
+            for key in keys:
+                child = node._get_node(key)
+                if isinstance(child, Node):
+                    pending.append(child)
+        elif isinstance(node, UnionNode):
+            child = node._value()
+            if isinstance(child, Node):
+                pending.append(child)
+
+    root_overrides = ExitStack()
+    descendant_overrides = ExitStack()
+    try:
+        for node in nodes:
+            if id(node) in context_roots or node._is_flags_root():
+                root_overrides.enter_context(flag_override(node, "readonly", True))
+            elif node._get_node_flag("readonly") is not True:
+                # Remove local False overrides so the node inherits the guard.
+                # Leaving descendants without local True flags also preserves
+                # read_write(parent)'s normal subtree behavior.
+                descendant_overrides.enter_context(
+                    flag_override(node, "readonly", None)
+                )
+        yield
+    finally:
+        # Restore roots before descendants so context-parented nodes invalidate
+        # their inherited flag cache against the restored root state.
+        root_overrides.close()
+        descendant_overrides.close()
+
+
+class _ReadOnlyDeferredTargetContext:
+    def __init__(self, config: Optional[Node]) -> None:
+        self._config_refs: List[weakref.ReferenceType[Node]] = []
+        while config is not None:
+            self._config_refs.append(weakref.ref(config))
+            config = config._get_parent()
+
+    def __call__(
+        self,
+        _deferred: _DeferredTarget,
+        _args: Tuple[Any, ...],
+        _kwargs: Dict[str, Any],
+    ) -> ContextManager[None]:
+        configs = [config for ref in self._config_refs if (config := ref()) is not None]
+        return _read_only_config_tree(*configs) if configs else nullcontext()
+
+    def __deepcopy__(self, memo: Dict[int, Any]) -> "_ReadOnlyDeferredTargetContext":
+        # A deep-copied deferred target remains in this process and can retain
+        # callable closures that reach the source tree, so preserve its guard.
+        copied = type(self)(None)
+        memo[id(self)] = copied
+        copied._config_refs = self._config_refs.copy()
+        return copied
 
 
 def _warn_legacy_execution_whitelist(target: str) -> None:
@@ -124,6 +231,7 @@ def _call_target(
     kwargs: Dict[str, Any],
     full_key: str,
     execution_whitelist: NormalizedExecutionWhitelist,
+    deferred_call_context: DeferredCallContext,
 ) -> Any:
     """Call target (type) with args and kwargs."""
     try:
@@ -160,6 +268,7 @@ def _call_target(
             deferred._hydra_resolved_from = discovery_path or resolved_target_name
             deferred._hydra_full_key = full_key
             deferred._hydra_execution_whitelist = execution_whitelist
+            deferred._hydra_call_context = deferred_call_context
             return deferred
         result = _target_(*args, **kwargs)
     except Exception as e:
@@ -178,6 +287,7 @@ def _call_target(
         full_key,
         execution_whitelist,
         discovery_path=discovery_path,
+        call_context=deferred_call_context,
     )
 
 
@@ -348,6 +458,7 @@ def instantiate(
         return None
 
     execution_whitelist = _resolve_execution_whitelist(_execution_whitelist_)
+    source_config_is_omegaconf = OmegaConf.is_config(config)
 
     for index, value in enumerate(args):
         _validate_callsite_override(value, (_Keys.ARGS, index))
@@ -375,13 +486,34 @@ def instantiate(
             config = _copy_config_with_override_interpolations(
                 config, resolution_overrides
             )
-        return instantiate_node(
-            config,
-            *args,
-            overrides=kwargs,
-            is_root=True,
-            execution_whitelist=execution_whitelist,
+            return instantiate_node(
+                config,
+                *args,
+                overrides=kwargs,
+                is_root=True,
+                execution_whitelist=execution_whitelist,
+            )
+        guard = (
+            _read_only_config_tree(config)
+            if source_config_is_omegaconf
+            else nullcontext()
         )
+        deferred_call_context = (
+            _ReadOnlyDeferredTargetContext(config)
+            if source_config_is_omegaconf
+            else None
+        )
+        # No private copy was made for OmegaConf input. Keep the entire
+        # instantiation read-only, including target constructors.
+        with guard:
+            return instantiate_node(
+                config,
+                *args,
+                overrides=kwargs,
+                is_root=True,
+                execution_whitelist=execution_whitelist,
+                deferred_call_context=deferred_call_context,
+            )
     elif OmegaConf.is_sequence(config):
         _recursive_ = kwargs.pop(_Keys.RECURSIVE, True)
         _convert_ = kwargs.pop(_Keys.CONVERT, ConvertMode.NONE)
@@ -394,14 +526,26 @@ def instantiate(
                 f"top-level {sequence_type} instantiation"
             )
 
-        return instantiate_node(
-            config,
-            *args,
-            recursive=_recursive_,
-            convert=_convert_,
-            partial=_partial_,
-            execution_whitelist=execution_whitelist,
+        guard = (
+            _read_only_config_tree(config)
+            if source_config_is_omegaconf
+            else nullcontext()
         )
+        deferred_call_context = (
+            _ReadOnlyDeferredTargetContext(config)
+            if source_config_is_omegaconf
+            else None
+        )
+        with guard:
+            return instantiate_node(
+                config,
+                *args,
+                recursive=_recursive_,
+                convert=_convert_,
+                partial=_partial_,
+                execution_whitelist=execution_whitelist,
+                deferred_call_context=deferred_call_context,
+            )
     else:
         raise InstantiationException(
             dedent(f"""\
@@ -530,6 +674,7 @@ def _instantiate_override(
     convert: Union[str, ConvertMode],
     recursive: bool,
     execution_whitelist: NormalizedExecutionWhitelist,
+    deferred_call_context: DeferredCallContext,
 ) -> Any:
     if is_structured_config(value):
         return value
@@ -549,6 +694,7 @@ def _instantiate_override(
             convert=convert,
             recursive=recursive,
             execution_whitelist=execution_whitelist,
+            deferred_call_context=deferred_call_context,
         )
 
     if isinstance(value, (list, tuple)):
@@ -558,6 +704,7 @@ def _instantiate_override(
                 convert=convert,
                 recursive=recursive,
                 execution_whitelist=execution_whitelist,
+                deferred_call_context=deferred_call_context,
             )
             for item in value
         ]
@@ -571,6 +718,7 @@ def _instantiate_override(
             convert=convert,
             recursive=recursive,
             execution_whitelist=execution_whitelist,
+            deferred_call_context=deferred_call_context,
         )
     return value
 
@@ -744,13 +892,24 @@ def _copy_config_with_override_interpolations(
     path = []
     current: Any = config
     while current._get_parent() is not None:
-        path.append(current._key())
-        current = current._get_parent()
+        parent = current._get_parent()
+        key = current._key()
+        path.append((key, current, _get_override_child(parent, key) is current))
+        current = parent
 
     copied_root = copy.deepcopy(current)
     copied_config = copied_root
-    for key in reversed(path):
+    for key, source_config, parent_owns_source in reversed(path):
         copied_config = _get_override_child(copied_config, key)
+        # Merged nodes can retain a parent only as interpolation context.
+        if not parent_owns_source:
+            # This tree is a private copy, so it is safe to mutate even when it
+            # retains read-only flags from the source configuration.
+            merge_source = copy.deepcopy(source_config)
+            # Isolate the private source from flags inherited through its
+            # original parent while preserving that parent for interpolation.
+            merge_source._set_flags_root(True)
+            copied_config._merge_with(merge_source, _allow_readonly_target=True)
 
     if copied_config._is_none():
         ref_type = copied_config._metadata.ref_type
@@ -788,6 +947,7 @@ def _instantiate_effective_value(
     convert: Union[str, ConvertMode],
     recursive: bool,
     execution_whitelist: NormalizedExecutionWhitelist,
+    deferred_call_context: DeferredCallContext,
 ) -> Any:
     if overrides is not None and key in overrides:
         override = overrides[key]
@@ -806,6 +966,7 @@ def _instantiate_effective_value(
                         convert=convert,
                         recursive=recursive,
                         execution_whitelist=execution_whitelist,
+                        deferred_call_context=deferred_call_context,
                     )
                 return value
         return _instantiate_override(
@@ -813,6 +974,7 @@ def _instantiate_effective_value(
             convert=convert,
             recursive=recursive,
             execution_whitelist=execution_whitelist,
+            deferred_call_context=deferred_call_context,
         )
 
     value = node[key]
@@ -822,6 +984,7 @@ def _instantiate_effective_value(
             convert=convert,
             recursive=recursive,
             execution_whitelist=execution_whitelist,
+            deferred_call_context=deferred_call_context,
         )
     return value
 
@@ -835,6 +998,7 @@ def instantiate_node(
     partial: bool = False,
     is_root: bool = False,
     execution_whitelist: NormalizedExecutionWhitelist = None,
+    deferred_call_context: DeferredCallContext = None,
 ) -> Any:
     # Return None if config is None
     if node is None or (
@@ -886,6 +1050,7 @@ def instantiate_node(
                 convert=convert,
                 recursive=recursive,
                 execution_whitelist=execution_whitelist,
+                deferred_call_context=deferred_call_context,
             )
             for item in node._iter_ex(resolve=True)
         ]
@@ -924,11 +1089,18 @@ def instantiate_node(
                         convert=convert,
                         recursive=recursive,
                         execution_whitelist=execution_whitelist,
+                        deferred_call_context=deferred_call_context,
                     )
                     kwargs[key] = _convert_node(value, convert)
 
             return _call_target(
-                _target_, partial, args, kwargs, full_key, execution_whitelist
+                _target_,
+                partial,
+                args,
+                kwargs,
+                full_key,
+                execution_whitelist,
+                deferred_call_context,
             )
         else:
             object_type = node._metadata.object_type
@@ -956,6 +1128,7 @@ def instantiate_node(
                         convert=convert,
                         recursive=recursive,
                         execution_whitelist=execution_whitelist,
+                        deferred_call_context=deferred_call_context,
                     )
                 return dict_items
             else:
@@ -973,6 +1146,7 @@ def instantiate_node(
                             convert=convert,
                             recursive=recursive,
                             execution_whitelist=execution_whitelist,
+                            deferred_call_context=deferred_call_context,
                         )
                     )
                 cfg._set_parent(node)

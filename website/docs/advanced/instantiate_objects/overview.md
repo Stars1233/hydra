@@ -178,7 +178,14 @@ without call-site overrides do not make an additional input copy. When
 overrides are present, Hydra uses a private copy so configured interpolations
 resolve against the call-site values while leaving the input unchanged. Runtime
 state established by an earlier target can still be used while resolving a
-later argument.
+later argument. During copy-free instantiation, Hydra temporarily marks the
+source configuration read-only, including while target constructors run, and
+restores its previous state before returning. Constructors can use OmegaConf's
+`read_write()` context manager to opt in to mutation explicitly.
+
+Hydra `_partial_` factories cannot be pickled before invocation. Invoke the
+factory first; whether the constructed object can be pickled is determined by
+that object's type.
 
 Primitive values, native `list`, `tuple`, and `dict` containers, and OmegaConf
 containers passed at the call-site retain Hydra's normal configuration
