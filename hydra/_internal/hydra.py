@@ -208,23 +208,34 @@ class Hydra:
             activate_config_repository=True,
         )
 
-        callbacks = Callbacks(cfg)
-        callbacks.on_multirun_start(config=cfg, config_name=config_name)
+        # Install the composed controller config so controller-side components
+        # (callbacks, sweeper, launcher) can resolve ${hydra:...} interpolations
+        # such as hydra.runtime.cwd. Individual jobs temporarily replace this
+        # via run_job(), which saves and restores the previous value.
+        orig_hydra_cfg = HydraConfig.instance().cfg
+        HydraConfig.instance().set_config(cfg)
+        try:
+            callbacks = Callbacks(cfg)
+            callbacks.on_multirun_start(config=cfg, config_name=config_name)
 
-        sweeper = Plugins.instance().instantiate_sweeper(
-            config=cfg,
-            hydra_context=HydraContext(
-                config_loader=self.config_loader,
-                callbacks=callbacks,
-                execution_whitelist=_get_active_execution_whitelist(),
-            ),
-            task_function=task_function,
-        )
-        task_overrides = OmegaConf.to_container(cfg.hydra.overrides.task, resolve=False)
-        assert isinstance(task_overrides, list)
-        ret = sweeper.sweep(arguments=task_overrides)
-        callbacks.on_multirun_end(config=cfg, config_name=config_name)
-        return ret
+            sweeper = Plugins.instance().instantiate_sweeper(
+                config=cfg,
+                hydra_context=HydraContext(
+                    config_loader=self.config_loader,
+                    callbacks=callbacks,
+                    execution_whitelist=_get_active_execution_whitelist(),
+                ),
+                task_function=task_function,
+            )
+            task_overrides = OmegaConf.to_container(
+                cfg.hydra.overrides.task, resolve=False
+            )
+            assert isinstance(task_overrides, list)
+            ret = sweeper.sweep(arguments=task_overrides)
+            callbacks.on_multirun_end(config=cfg, config_name=config_name)
+            return ret
+        finally:
+            HydraConfig.instance().cfg = orig_hydra_cfg
 
     @staticmethod
     def get_sanitized_hydra_cfg(src_cfg: DictConfig) -> DictConfig:

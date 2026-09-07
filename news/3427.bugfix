@@ -1,0 +1,1 @@
+Install HydraConfig for the multirun controller before callbacks and the sweeper are initialized.

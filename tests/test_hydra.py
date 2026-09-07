@@ -13,12 +13,15 @@ from omegaconf import DictConfig, OmegaConf
 from pytest import mark, param, raises, warns
 
 from hydra import MissingConfigException, __version__, main, version
+from hydra.core.hydra_config import HydraConfig
 from hydra.errors import (
     ConfigCompositionException,
     Hydra14MigrationWarning,
     Hydra15MigrationWarning,
     HydraException,
+    InstantiationException,
 )
+from hydra.experimental.callback import Callback
 from hydra.test_utils.test_utils import (
     TSweepRunner,
     TTaskRunner,
@@ -32,6 +35,7 @@ from hydra.test_utils.test_utils import (
     run_with_error,
     verify_dir_outputs,
 )
+from hydra.utils import execution_whitelist
 
 chdir_hydra_root()
 
@@ -1982,3 +1986,81 @@ def test_hydra_runtime_choice_1882(tmpdir: Path) -> None:
         from_name="Expected output",
         to_name="Actual output",
     )
+
+
+RESOLVED: dict[str, Any] = {}
+
+
+class ControllerProbe(Callback):
+    def __init__(self, controller_cwd: str) -> None:
+        RESOLVED["controller_cwd"] = controller_cwd
+
+
+class RaisingCallback(Callback):
+    def __init__(self) -> None:
+        raise RuntimeError("boom")
+
+
+def test_controller_resolution_and_restore(
+    hydra_restore_singletons: Any,
+    hydra_sweep_runner: TSweepRunner,
+    tmpdir: Path,
+) -> None:
+    """Regression for #3427: controller ${hydra:...} resolves; HydraConfig restored."""
+    RESOLVED.clear()
+    assert not HydraConfig.initialized()
+    seen: dict[str, Any] = {}
+
+    def task(cfg: DictConfig) -> None:
+        seen["job_id"] = HydraConfig.get().job.id
+
+    with (
+        execution_whitelist("tests.test_hydra.*"),
+        hydra_sweep_runner(
+            calling_file="tests/test_apps/simple_app/my_app.py",
+            calling_module=None,
+            config_path=None,
+            config_name=None,
+            task_function=task,
+            overrides=[
+                "+x=1",
+                "+hydra.callbacks.probe._target_=tests.test_hydra.ControllerProbe",
+                "+hydra.callbacks.probe.controller_cwd=${hydra:runtime.cwd}",
+            ],
+            temp_dir=tmpdir,
+        ),
+    ):
+        pass
+
+    assert "controller_cwd" in RESOLVED
+    assert seen["job_id"] == "0"
+    assert not HydraConfig.initialized()
+
+
+def test_multirun_restores_hydra_config_when_sweep_raises(
+    hydra_restore_singletons: Any,
+    hydra_sweep_runner: TSweepRunner,
+    tmpdir: Path,
+) -> None:
+    """HydraConfig must be restored even when the sweep raises."""
+    assert not HydraConfig.initialized()
+
+    with raises(InstantiationException, match="boom"):
+        with (
+            execution_whitelist("tests.test_hydra.*"),
+            hydra_sweep_runner(
+                calling_file="tests/test_apps/simple_app/my_app.py",
+                calling_module=None,
+                config_path=None,
+                config_name=None,
+                task_function=None,
+                overrides=[
+                    "+x=1",
+                    "+hydra.callbacks.boom._target_=tests.test_hydra.RaisingCallback",
+                ],
+                temp_dir=tmpdir,
+            ),
+        ):
+            pass
+
+    assert not HydraConfig.initialized()
