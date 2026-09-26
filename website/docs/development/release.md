@@ -69,6 +69,13 @@ one package through a shell, for example
 The Hydra core version is defined in `hydra/__init__.py`. Plugin versions are
 defined in each plugin package's `hydra_plugins/<plugin>/__init__.py`.
 
+Bundled plugins support only the matching Hydra Core release line, including
+its dev releases. For 1.4 plugins, require
+`hydra-core>=1.4.0.dev1,<1.5.0.dev0`; update both bounds for later lines.
+There are currently no bundled cross-line exceptions. Before release, run
+`pytest tests/test_plugin_core_requirements.py` to check the generated package
+metadata for both bounds.
+
 For coordinated Hydra releases, set the core and bundled plugin versions
 together:
 

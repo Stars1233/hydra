@@ -16,16 +16,17 @@ This plugin enables Hydra applications to utilize [Optuna](https://optuna.org) f
 
 ## Installation
 
-This plugin requires `hydra-core>=1.1.0`. Please install it with the following command:
+This plugin requires Hydra Core 1.4 (`hydra-core>=1.4.0.dev1,<1.5.0.dev0`).
+Please install it with the following command:
 
 ```commandline
-pip install hydra-core --upgrade
+pip install --upgrade --pre "hydra-core>=1.4.0.dev1,<1.5.0.dev0"
 ```
 
 You can install the plugin via pip:
 
 ```commandline
-pip install hydra-optuna-sweeper --upgrade
+pip install --upgrade --pre "hydra-optuna-sweeper>=1.4.0.dev1,<1.5.0.dev0"
 ```
 There are several standard approaches for configuring plugins. Check [this page](../patterns/configuring_plugins.md) for more information.
 
