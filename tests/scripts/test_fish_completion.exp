@@ -1,38 +1,40 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 log_user 0
 set timeout 15
+if {[info exists env(HYDRA_EXPECT_TIMEOUT)]} {
+    set timeout $env(HYDRA_EXPECT_TIMEOUT)
+}
 
 # Start fish without user configuration
 set env(HOME) [exec mktemp -d]
 puts "HOME: $env(HOME)"
 
-spawn fish -C "function fish_prompt; echo '> '; end; function fish_greeting; ; end"
-expect >
-
-send "fish --version\r"
-expect >
-
-send "set TERM dumb\r"
-expect >
-
 set in_line [lindex $argv 1]
 set len [expr [string length $in_line] - 1]
 set line [string range $in_line 5 $len]
-set num_tabs [lindex $argv 2]
 puts "input line: '$line'"
 
-send "[lindex $argv 0] -sc install=fish | source\r"
-expect >
-
-set command "[lindex $argv 0] $line\t"
+set command "[lindex $argv 0] $line"
 puts "command: '$command'"
 
-send "complete --do-complete \"$command\"\r"
+set fish_script "[lindex $argv 0] -sc install=fish | source; complete --do-complete \"$command\""
+spawn -noecho fish -c $fish_script
+match_max 100000
+expect {
+    eof {set completions $expect_out(buffer)}
+    timeout {puts "Error: fish completion timed out"; exit 2}
+}
+set status [wait]
+if {[lindex $status 3] != 0} {
+    puts "Error running fish completion: '$completions'"
+    exit 2
+}
 
 puts "\nMatching:\n"
 foreach arg [lrange $argv 3 end] {
-    expect {
-	"$arg" {puts "matched '$arg' to '$expect_out(0,string)'\nbuffer: '$expect_out(buffer)'";continue}
-        timeout {puts "Error matching $arg\nbuffer: '$expect_out(buffer)'"; exit 1}
+    if {[string first $arg $completions] < 0} {
+        puts "Error matching $arg\noutput: '$completions'"
+        exit 1
     }
+    puts "matched '$arg' to completion output"
 }
